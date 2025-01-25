@@ -1,3 +1,4 @@
+"""Code is adapted from https://github.com/amazon-science/earth-forecasting-transformer. Their license under the Apache-2.0 License."""
 import matplotlib
 from earthformer.datasets.sevir.sevir_dataloader import PREPROCESS_SCALE_01, PREPROCESS_OFFSET_01
 from matplotlib import pyplot as plt, animation
@@ -7,15 +8,6 @@ matplotlib.use('agg')
 import sys
 
 sys.path.append('../../..')
-r"""
-import wandb
-
-wandb.init(
-    entity="loongs",
-    project="SEVIR",
-    name="dev/vil/full-2",
-)
-"""
 
 import matplotlib.animation as animation
 import cartopy.crs as ccrs
@@ -71,151 +63,6 @@ def gram_matrix(y):
     features = y.reshape(b, ch, w * h)
     gram = torch.matmul(features, features.permute(0, 2, 1)) / (ch * w * h)
     return gram
-
-
-class PerceptualLoss(_Loss):
-
-    def __init__(self, end_layer=22):
-        super(PerceptualLoss, self).__init__()
-        self.model = models.vgg16(pretrained=True).features[1:end_layer]
-        # if torch.cuda.is_available():
-        #     self.model = self.model.cuda()
-        self.model.eval()
-        self.criterion = nn.MSELoss()
-        for param in self.parameters():
-            param.requires_grad = False
-
-    def forward(self, inputs, targets):
-
-        # preprocess on data shape
-        b, t, ih, iw, c = inputs.shape
-        b, t, th, tw, c = targets.shape
-        shape = (48, 48)
-        inputs = inputs.permute(0, 1, 4, 2, 3).reshape(b * t, c, ih, iw)
-        targets = targets.permute(0, 1, 4, 2, 3).reshape(b * t, c, th, tw)
-
-        scale_w = shape[0] / ih
-        scale_h = shape[1] / iw
-        # 插值到48*48
-        inputs = F.interpolate(input=inputs, scale_factor=(scale_h, scale_w))
-        targets = F.interpolate(input=targets, scale_factor=(scale_h, scale_w))
-
-        inputs = torch.cat([inputs] * 64, dim=1)
-        targets = torch.cat([targets] * 64, dim=1)
-
-        feature_reconstruction_loss = torch.tensor(0, dtype=inputs.dtype, device=inputs.device)
-        style_reconstruction_loss = torch.tensor(0, dtype=inputs.dtype, device=inputs.device)
-        x_input = inputs
-        x_target = targets
-        for idx, module in enumerate(self.model):
-            x_input = module(x_input)
-            x_target = module(x_target)
-            if idx in [3, 8, 15, 22]:
-                tb, tc, th, tw = x_input.shape
-                # print(x_input.shape)  [26,64,24,24] [26,128,12,12] [26,256,6,6]
-                feature_reconstruction_loss += self.criterion(x_input, x_target) / (tc * th * tw)
-                style_reconstruction_loss += self.criterion(gram_matrix(x_input), gram_matrix(x_target))
-        loss = feature_reconstruction_loss + style_reconstruction_loss
-
-        return loss
-
-
-def cal_vil_dice_160(pred, target, tau=1):
-    scale = PREPROCESS_SCALE_01['vil']  # 1 / 255
-    offset = PREPROCESS_OFFSET_01['vil']  # 0
-    thresholds = [16, 74, 133, 160, 181, 219]
-    eps = 1e-6
-
-    pred = pred / scale - offset
-    target = target / scale - offset
-    p = torch.sigmoid((pred - 160) / tau)
-    # p = 1 / (1 + torch.exp(-(pred - 160) / tau))
-    t = (target > 160).float()
-    inter = (p * t).sum()
-    uni = p.sum() + t.sum()
-    dice = 2 * inter / (uni + eps)
-    return 1 - dice
-
-    # is_nan = torch.logical_or(torch.isnan(p), torch.isnan(t))
-    # p[is_nan] = 0
-    # t[is_nan] = 0
-
-
-def cal_vil_metrics(pred, target, tau=0.01):
-    scale = PREPROCESS_SCALE_01['vil']  # 1 / 255
-    offset = PREPROCESS_OFFSET_01['vil']  # 0
-    thresholds = [16, 74, 133, 160, 181, 219]
-    eps = 1e-6
-
-    pred = pred / scale - offset
-    target = target / scale - offset
-    pred = pred.view(pred.shape[0], -1)
-    target = target.view(target.shape[0], -1)
-
-    ret = {'csi': [], 'pod': [], 'sucr': [], 'log_bias': [], 'thresholds': thresholds}
-    for T in thresholds:
-        p = torch.sigmoid((pred - T) / tau)
-        t = torch.sigmoid((target - T) / tau)
-        hits = torch.sum(t * p, dim=-1)  # TP
-        misses = torch.sum(t * (1 - p), dim=-1)  # FN
-        fas = torch.sum((1 - t) * p, dim=-1)  # FP
-        csi = hits / (hits + misses + fas + eps)
-        pod = hits / (hits + misses + eps)
-        sucr = hits / (hits + fas + eps)
-        bias = (hits + fas) / (hits + misses + eps)
-        log_bias = torch.pow(bias / torch.log(torch.tensor(2.0)), 2.0)
-        ret['csi'].append(csi)
-        ret['pod'].append(pod)
-        ret['sucr'].append(sucr)
-        ret['log_bias'].append(log_bias)
-    return ret
-
-
-class TimerCallback(pl.Callback):
-    def __init__(self):
-        super().__init__()
-        self.train_cumulative_time = 0
-        self.val_cumulative_time = 0
-        self.test_cumulative_time = 0
-
-    def on_train_start(self, trainer, pl_module):
-        self.train_cumulative_time = 0
-        self.val_cumulative_time = 0
-        self.test_cumulative_time = 0
-
-    def on_train_epoch_start(self, trainer, pl_module):
-        self.train_epoch_start_time = time.time()
-
-    def on_train_epoch_end(self, trainer, pl_module):
-        epoch_time = time.time() - self.train_epoch_start_time
-        self.train_cumulative_time += epoch_time
-        print(f"Training - Epoch {trainer.current_epoch} time: {epoch_time:.2f} seconds")
-        print(f"  - Total cumulative training time up to now: {self.train_cumulative_time:.2f} seconds")
-
-    def on_validation_epoch_start(self, trainer, pl_module):
-        self.val_epoch_start_time = time.time()
-
-    def on_validation_epoch_end(self, trainer, pl_module):
-        epoch_time = time.time() - self.val_epoch_start_time
-        self.val_cumulative_time += epoch_time
-        print(f"Validation - Epoch {trainer.current_epoch} time: {epoch_time:.2f} seconds")
-        print(f"  - Total cumulative validation time up to now: {self.val_cumulative_time:.2f} seconds")
-
-    def on_test_epoch_start(self, trainer, pl_module):
-        self.test_epoch_start_time = time.time()
-
-    def on_test_epoch_end(self, trainer, pl_module):
-        epoch_time = time.time() - self.test_epoch_start_time
-        self.test_cumulative_time += epoch_time
-        print(f"Testing - Epoch {trainer.current_epoch} time: {epoch_time:.2f} seconds")
-        print(f"  - Total cumulative testing time up to now: {self.test_cumulative_time:.2f} seconds")
-
-    def on_train_end(self, trainer, pl_module):
-        print(f"Total cumulative training time: {self.train_cumulative_time:.2f} seconds")
-        print(f"Total cumulative validation time: {self.val_cumulative_time:.2f} seconds")
-
-    def on_test_end(self, trainer, pl_module):
-        print(f"Total cumulative testing time: {self.test_cumulative_time:.2f} seconds")
 
 
 class CuboidSEVIRPLModule(pl.LightningModule):
