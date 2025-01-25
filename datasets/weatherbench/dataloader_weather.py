@@ -1,3 +1,5 @@
+"""Code is adapted from https://github.com/chengtan9907/OpenSTL. Their license under the Apache-2.0 License."""
+
 import warnings
 warnings.filterwarnings("ignore")
 
